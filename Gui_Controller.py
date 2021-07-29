@@ -441,10 +441,8 @@ class FrogLand:
             self.runnable_update_motor = UpdateMotorPositionRunnable(
                 self.motor_interface)
         elif string == "spectrogram":
-            self.runnable_spectrogram = True
-            self.runnable_spectrogram = CollectSpectrogramRunnable(
-                self.motor_interface, self.spectrometer, self.end_pos_fs,
-                self.step_size_um_spectrogram)
+            self.spectrogram_runnable_exists = True
+            self.runnable_spectrogram = CollectSpectrogramRunnable(self)
 
     def connect_runnable(self, string):
         """
@@ -479,25 +477,17 @@ class FrogLand:
             self.runnable_update_motor.finished.connect(self.motor_finished)
 
         elif string == "spectrogram":
-            # spectrogram updates current position
-            self.runnable_spectrogram.progress.connect(self.update_current_pos)
-
             # spectrogram updates the plot of the spectrogram
+            # spectrogram updates the 1D spectrum plot
             self.runnable_spectrogram.progress.connect(
                 self.update_spectrogram_plot)
-
-            # to avoid redundant spectrum retrievals,
-            # the update_spectrogram_plot function retrieves the spectrum
-            # and then uses it to update the 1D plot
-
-            # spectrogram updates the spectrum plot
-            # self.runnable_spectrogram.progress.connect(self.plot_update)
 
             # the stop button stops the spectrogram collection
             self.actionStop.triggered.connect(self.stop_spectrogram_collection)
 
+            # spectrogram finished
             self.runnable_spectrogram.finished.connect(
-                self.stop_spectrogram_collection)
+                self.spectrogram_finished)
 
     def connect(self):
         # if the start continuous update button is pressed start the
@@ -995,60 +985,36 @@ class FrogLand:
                             *args,
                             overshoot_for_backlash=overshoot_for_backlash):
 
-        # stop spectrogram collection, and continuous spectrum update
-        # if those are already running and return
+        if self.motor_runnable_exists:
+            self.stop_motor()
+            return
+
         if self.spectrogram_runnable_exists:
             self.stop_spectrogram_collection()
             return
 
-        # stop the continuous spectrum update in the first tab
         if self.cont_update_runnable_exists:
             self.stop_continuous_update()
+            pass
 
-        # if overshoot_for_backlash is true, then the idea is to
-        # overshoot the start position by the backlash amount,
-        # then move to the start position
-        if overshoot_for_backlash:
-            try:
-                self.move_to_pos(self.start_pos_um - self.backlash)
-            except:
-                return
+        self.move_to_pos(self.start_pos_um)
+        self.runnable_update_motor.finished.connect(self._check_if_at_start)
 
-            # self.btn_collect_spectrogram.setText("Stop \n Collection")
-            self.runnable_update_motor.finished.connect(self._move_to_start)
+    def _check_if_at_start(self):
+        if abs(self.motor_interface.pos_um - self.start_pos_um) > tol_um:
+            return
 
-        # if overshoot_for_backlash is false, then just move to the start
-        # position
         else:
-            try:
-                stp_msg = self.move_to_pos(self.start_pos_um)
-                if stp_msg == "motor stopped":
-                    return
-            except:
-                return
+            self._start_spectrogram_collection()
 
-            self.runnable_update_motor.finished.connect(
-                self._continue_spectrogram_collection)
+    def _start_spectrogram_collection(self):
+        self._prepare_spectrogram_collection()
 
-    # I'm assuming the only thing that can take a while is moving to the
-    # start position.
-    def _move_to_start(self):
-        # in case you stopped motion before you got there, only move
-        # to start if you are within tol_um of the start position
-        target = self.start_pos_um - self.backlash
-        if abs(self.motor_interface.pos_um - target) > 1.5 * tol_um:
-            return
+        self.create_runnable('spectrogram')
+        self.connect_runnable('spectrogram')
+        pool.start(self.runnable_spectrogram)
 
-        # try to move to the start position
-        try:
-            self.move_to_pos(self.start_pos_um)
-        except:
-            return
-
-        self.runnable_update_motor.finished.connect(
-            self._continue_spectrogram_collection)
-
-    def _continue_spectrogram_collection(self):
+    def _prepare_spectrogram_collection(self):
         # define the time and wavelength axis for 2d plot update
         self.Taxis_fs = np.arange(self.motor_interface.pos_fs, self.end_pos_fs,
                                   self.step_size_fs_spectrogram)
@@ -1063,13 +1029,6 @@ class FrogLand:
             lims = np.array([0, max(self.intensities)])
             self.plot1d_window.format_to_xy_data(self.spectrometer.wavelengths,
                                                  lims)
-        # self.plot1d_window.format_to_xy_data(self.spectrometer.wavelengths,
-        #                                      np.array([0, 1]))
-
-        # start the spectrogram collection
-        self.create_runnable('spectrogram')
-        self.connect_runnable('spectrogram')
-        pool.start(self.runnable_spectrogram)
 
         # set up the 2d and 1d plots (set plot axis limits)
         self.btn_collect_spectrogram.setText("Stop \n Collection")
@@ -1089,6 +1048,11 @@ class FrogLand:
 
         self.btn_collect_spectrogram.setText("Start \n Collection")
 
+    def spectrogram_finished(self):
+        self.spectrogram_runnable_exists = False
+
+        self.btn_collect_spectrogram.setText("Start \n Collection")
+
     def update_spectrogram_plot(self, X):
         self.plot_update(X)
 
@@ -1099,54 +1063,53 @@ class FrogLand:
 
 
 class CollectSpectrogramRunnable(qtc.QRunnable):
-    def __init__(self, motor_interface, spectrometer, end_fs, step_um):
+    def __init__(self, frogland):
         super().__init__()
 
-        motor_interface: MotorInterface
-        spectrometer: util.Spectrometer
-        self.motor_interface = motor_interface
-        self.spectrometer = spectrometer
+        frogland: FrogLand
+        self.frogland = frogland
+        self.motor_interface = frogland.motor_interface
+        self.spectrometer = frogland.spectrometer
+
+        self.n = 0
+        self.n_stop = len(frogland.Taxis_fs)
+        self._stop = False
+
+        self.end_pos_um = frogland.end_pos_um
+        self.step_um = frogland.step_size_um_spectrogram
+
         self.signal = Signal()
         self.started = self.signal.started
         self.progress = self.signal.progress
         self.finished = self.signal.finished
 
-        self.end_fs = end_fs
-        self.step_um = step_um
-
-        self._stop = False
-
-        self.n = 0
-
     def stop(self):
         self._stop = True
 
-    def run(self):
-        while self.motor_interface.pos_fs < self.end_fs:
+    def step_one(self):
+        if self._stop:
+            return
 
-            # if stop has been set to true, then stop
-            if self._stop:
-                self._stop = False
-                return
-
-            # acquire spectrum
+        if self.n < self.n_stop:
             wavelengths, intensities = self.spectrometer.get_spectrum()
+            self.progress.emit((wavelengths, intensities, self.n))
 
-            # emit spectrum (wavelengths, spectrum) and index along the
-            # step
-            self.progress.emit([wavelengths, intensities, self.n])
+            # self.frogland.step_right(step_size_um=self.step_um,
+            #                          ignore_spectrogram=True)
+            # self.frogland.runnable_update_motor.finished.connect(self.step_two)
+            time.sleep(1)
+            self.step_two()
 
-            # step the motor
-            self.motor_interface.move_by_um(self.step_um)
+        else:
+            self.finished.emit(None)
 
-            # step the index
-            self.n += 1
+    def step_two(self):
+        print("did step_two")
+        self.n += 1
+        self.step_one()
 
-            if emulating_spectrometer:
-                sleep_time = self.spectrometer.integration_time_micros * 1e-6
-                time.sleep(sleep_time)
-
-        self.finished.emit(None)
+    def run(self):
+        self.step_one()
 
 
 class UpdateMotorPositionRunnable(qtc.QRunnable):
