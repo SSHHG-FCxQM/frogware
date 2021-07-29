@@ -21,7 +21,7 @@ backlash = 3.0  # um
 overshoot_for_backlash = False
 edge_limit_buffer_mm = 1e-3  # 1 um
 emulating_spectrometer = True
-emulating_motor = False
+emulating_motor = True
 
 # some packages take time to import (namely thorlabs_apt), so import these
 # only if you are not emulating
@@ -828,29 +828,28 @@ class FrogLand:
     def zero_ambient(self):
         self.ambient_intensity[:] = 0.
 
-    def step_right(self):
+    def step_right(self, *args, step_size_um=None, ignore_spectrogram=False):
+        if step_size_um is None:
+            step_size_um = self.step_size_um
+
         # if motor is currently moving, just stop the motor.
         if self.motor_runnable_exists:
             self.stop_motor()
+            return
 
+        if not ignore_spectrogram:
             if self.spectrogram_runnable_exists:
                 self.stop_spectrogram_collection()
-            return
-
-        # if a motor runnable doesn't exist but a spectrogram
-        # runnable does, stop the spectrogram collection
-        elif self.spectrogram_runnable_exists:
-            self.stop_spectrogram_collection()
-            return
+                return
 
         # set a limit on the step size to be 50 fs
         if self.step_size_fs > self.step_size_max:
             raise_error(self.error_window, "step size cannot exceed 50 fs")
             return
 
-        exceed = self.motor_interface.value_exceeds_limits(self.step_size_um)
+        exceed = self.motor_interface.value_exceeds_limits(step_size_um)
         if not exceed:
-            self.motor_interface.move_by_um(self.step_size_um)
+            self.motor_interface.move_by_um(step_size_um)
 
             self.create_runnable('motor')
             self.connect_runnable('motor')
@@ -858,29 +857,28 @@ class FrogLand:
         else:
             return
 
-    def step_left(self):
+    def step_left(self, *args, step_size_um=None, ignore_spectrogram=False):
+        if step_size_um is None:
+            step_size_um = self.step_size_um
+
         # if motor is currently moving, just stop the motor.
         if self.motor_runnable_exists:
             self.stop_motor()
+            return
 
+        if not ignore_spectrogram:
             if self.spectrogram_runnable_exists:
                 self.stop_spectrogram_collection()
-            return
-
-        # if a motor runnable doesn't exist but a spectrogram
-        # runnable does, stop the spectrogram collection
-        elif self.spectrogram_runnable_exists:
-            self.stop_spectrogram_collection()
-            return
+                return
 
         # set a limit on the step size to be 50 fs
         if self.step_size_fs > self.step_size_max:
             raise_error(self.error_window, "step size cannot exceed 50 fs")
             return
 
-        exceed = self.motor_interface.value_exceeds_limits(-self.step_size_um)
+        exceed = self.motor_interface.value_exceeds_limits(-step_size_um)
         if not exceed:
-            self.motor_interface.move_by_um(-self.step_size_um)
+            self.motor_interface.move_by_um(-step_size_um)
 
             self.create_runnable('motor')
             self.connect_runnable('motor')
@@ -889,7 +887,6 @@ class FrogLand:
             return
 
     def move_to_pos(self, target_um=False):
-
         # I would like to have the move_to_pos button
         # work like a toggle. So, if the runnable already exists, then
         # just stop the process and return.
@@ -923,7 +920,7 @@ class FrogLand:
 
             pool.start(self.runnable_update_motor)
         else:
-            raise RuntimeError("value exceeds motor limits")
+            return
 
     def update_current_pos(self, pos_um):
         motor_pos_fs = dist_um_to_T_fs(pos_um - self.motor_interface.T0_um)
